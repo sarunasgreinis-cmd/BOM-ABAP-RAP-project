@@ -1,0 +1,45 @@
+@AbapCatalog.viewEnhancementCategory: [ #NONE ]
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'BOM Upload: Interface Staging'
+@Metadata.ignorePropagatedAnnotations: true
+@ObjectModel.usageType: {
+    serviceQuality: #X,
+    sizeCategory: #S,
+    dataClass: #MIXED  
+}
+
+define view entity ZBMU_I_STAGING 
+  as select from zbmu_staging_bom
+  association to parent ZBMU_I_HEADER as _XLUser on  $projection.EndUser = _XLUser.EndUser
+                                                   and $projection.FileId  = _XLUser.FileId
+  
+{
+  key end_user          as EndUser, 
+  key file_id           as FileId,
+  key line_id           as LineId,
+  key line_no           as LineNumber, 
+      material          as Material, 
+      plant             as Plant, 
+      bomusage          as BomUsage,
+      alternativebom    as AlternativeBom,
+      changenumber      as ChangeNumber,
+      validfrom         as ValidFrom,
+      itemnumber        as ItemNumber,
+      component         as Component,
+      unitofmeasure     as UnitOfMeasure, 
+      itemcategory      as ItemCategory,
+      componenttext     as ComponentText,
+      quantity          as Quantity,
+      bomnumber         as BomNumber,
+      itemnode          as ItemNode,
+      itemcounter       as ItemCounter,
+      deleteindicator   as DeleteIndicator,
+      operationscrap    as OperationScrap,
+      processingstatus  as ProcessingStatus,
+      logmessage        as LogMessage,
+  
+  /* Associations */
+  
+      _XLUser 
+      
+}
