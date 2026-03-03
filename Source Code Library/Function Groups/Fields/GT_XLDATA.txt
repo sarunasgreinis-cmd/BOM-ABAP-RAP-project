@@ -1,0 +1,5 @@
+FUNCTION-POOL ZBMU_FG_BOM.              "MESSAGE-ID ..
+
+* Global Data for Legacy Forms
+DATA: gt_xldata TYPE ZBMU_TT_MAT_DOC.   " Must match your Import Type
+DATA: gt_return TYPE bapirettab.        " Must match your Export Type
