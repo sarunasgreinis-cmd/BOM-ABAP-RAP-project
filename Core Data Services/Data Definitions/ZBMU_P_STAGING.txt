@@ -1,0 +1,34 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'BOM Upload: Projection Staging'
+@Metadata.ignorePropagatedAnnotations: true
+@Metadata.allowExtensions: true
+define view entity ZBMU_P_STAGING
+  as projection on ZBMU_I_STAGING
+{
+  key EndUser,
+  key FileId,
+  key LineId,
+  key LineNumber,
+      Material,
+      Plant,
+      BomUsage,
+      AlternativeBom,
+      ChangeNumber,
+      ValidFrom,
+      ItemNumber,
+      Component,
+      UnitOfMeasure,
+      ItemCategory,
+      ComponentText,
+      Quantity,
+      BomNumber,
+      ItemNode,
+      ItemCounter,
+      OperationScrap,
+      DeleteIndicator,
+      ProcessingStatus,
+      LogMessage,
+
+      /* Associations */
+      _XLUser: redirected to parent ZBMU_P_HEADER
+}
