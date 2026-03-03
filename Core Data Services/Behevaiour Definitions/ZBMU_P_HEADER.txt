@@ -1,0 +1,33 @@
+projection;
+strict ( 2 );
+use draft;
+
+define behavior for ZBMU_P_HEADER //alias XLHead
+{
+  use create;
+  use update;
+  use delete;
+
+  use action uploadExcelData;
+  use action DownloadExcel;
+
+
+  use action Activate;
+  use action Edit;
+  use action Discard;
+  use action Resume;
+  use action Prepare;
+
+  use association _XLData { create; with draft; }
+
+}
+
+define behavior for ZBMU_P_STAGING //alias XLData
+{
+  use update;
+  use delete;
+
+  use action processData;
+
+  use association _XLUser { with draft; }
+}
