@@ -1,0 +1,5 @@
+@EndUserText.label: 'Service Definition for BOM Upload'
+define service ZBMU_SD_BOM_UPLOAD {
+  expose ZBMU_P_HEADER  as XLHead;
+  expose ZBMU_P_STAGING as XLData;
+}
