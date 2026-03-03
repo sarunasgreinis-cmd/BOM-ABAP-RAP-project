@@ -1,0 +1,221 @@
+FORM validate_data USING it_xldata TYPE zbmu_tt_mat_doc.
+
+ TYPES: BEGIN OF lty_keys_mat,
+           matnr TYPE matnr,
+           werks TYPE werks_d,
+           stlal TYPE stalt,
+         END OF lty_keys_mat.
+
+  TYPES: BEGIN OF lty_mast_data,
+           matnr TYPE mast-matnr,
+           werks TYPE mast-werks,
+           stlnr TYPE mast-stlnr,
+           stlal TYPE mast-stlal,
+         END OF lty_mast_data.
+
+  TYPES: BEGIN OF lty_marc_data,
+           matnr TYPE marc-matnr,
+           werks TYPE marc-werks,
+           mmsta TYPE marc-mmsta,
+         END OF lty_marc_data.
+
+  TYPES: BEGIN OF lty_stko_data,
+           stlnr TYPE stko-stlnr,
+           stlal TYPE stko-stlal,
+           loekz TYPE stko-loekz, " <--- The Deletion Flag
+         END OF lty_stko_data.
+
+  DATA: gt_stko TYPE STANDARD TABLE OF lty_stko_data.
+
+  DATA: gt_keys_mat TYPE STANDARD TABLE OF lty_keys_mat,
+        gt_mast     TYPE STANDARD TABLE OF lty_mast_data,
+        gt_marc     TYPE STANDARD TABLE OF lty_marc_data,
+        ls_return   TYPE bapiret2.
+
+  TYPES: BEGIN OF lty_mara_data,
+           matnr TYPE mara-matnr,
+           mstae TYPE mara-mstae, " Cross-Plant Status
+           lvorm TYPE mara-lvorm, " Client Deletion Flag
+         END OF lty_mara_data.
+
+  DATA: gt_mara TYPE STANDARD TABLE OF lty_mara_data.
+
+
+  LOOP AT it_xldata ASSIGNING FIELD-SYMBOL(<ls_fix>).
+    CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+      EXPORTING
+        input        = <ls_fix>-material
+      IMPORTING
+        output       = <ls_fix>-material
+      EXCEPTIONS
+        length_error = 1
+        OTHERS       = 2.
+  ENDLOOP.
+
+  " 2. PREPARATION: Collect Keys for Bulk Fetch
+  " -------------------------------------------
+  " We extract just the material/plant to ask the DB effectively
+  gt_keys_mat = VALUE #( FOR lwa_data IN it_xldata
+                         ( matnr = lwa_data-material
+                           werks = lwa_data-plant
+                           stlal = lwa_data-alternativebom ) ).
+
+  SORT gt_keys_mat BY matnr werks.
+  DELETE ADJACENT DUPLICATES FROM gt_keys_mat COMPARING matnr werks.
+
+  " Safety check: If list is empty, exit to avoid full DB scan
+  IF gt_keys_mat IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " 3. DATABASE FETCH (Hit DB only twice)
+  " -------------------------------------
+
+  " A) Check BOMs (MAST)
+  SELECT matnr, werks, stlnr, stlal
+    FROM mast
+    FOR ALL ENTRIES IN @gt_keys_mat
+    WHERE matnr = @gt_keys_mat-matnr
+      AND werks = @gt_keys_mat-werks
+      AND stlal = @gt_keys_mat-stlal
+      AND stlan = '1' " Production BOM
+    INTO TABLE @gt_mast.
+
+
+  " NEW: Get Deletion Status for the BOMs we just found
+  IF gt_mast IS NOT INITIAL.
+    SELECT stlnr, stlal, loekz
+      FROM stko
+      FOR ALL ENTRIES IN @gt_mast
+      WHERE stlnr = @gt_mast-stlnr
+      INTO TABLE @gt_stko.
+  ENDIF.
+
+  " B) Check Blocking Status (MARC)
+  SELECT matnr, werks, mmsta
+    FROM marc
+    FOR ALL ENTRIES IN @gt_keys_mat
+    WHERE matnr = @gt_keys_mat-matnr
+      AND werks = @gt_keys_mat-werks
+    INTO TABLE @gt_marc.
+
+  " C) Check Client Level Status (MARA)
+  SELECT matnr, mstae, lvorm
+    FROM mara
+    FOR ALL ENTRIES IN @gt_keys_mat
+    WHERE matnr = @gt_keys_mat-matnr
+    INTO TABLE @gt_mara.
+
+
+  " 4. VALIDATION LOOP (Process row by row)
+  " ---------------------------------------
+  LOOP AT it_xldata ASSIGNING FIELD-SYMBOL(<ls_row>).
+
+    " !!! CRITICAL FOR YOUR RAP APP !!!
+    " We capture the current loop index (1, 2, 3...)
+    " This allows your RAP code to match the error to the correct line.
+    DATA(lv_current_row) = sy-tabix.
+
+    DATA(lv_error_found) = abap_false.
+
+    " --- CHECK 1: Does BOM Exist? ---
+    READ TABLE gt_mast ASSIGNING FIELD-SYMBOL(<ls_mast>)
+         WITH KEY matnr = <ls_row>-material
+                  werks = <ls_row>-plant.
+
+    IF sy-subrc <> 0.
+      CLEAR ls_return.
+      ls_return-type       = 'E'.
+      ls_return-row        = lv_current_row. " <--- THIS MAPS TO RAP
+      ls_return-id         = 'ZBMU_MSG_CLASS'. " Change to your Msg Class
+      ls_return-number     = '001'.
+      ls_return-message_v1 = <ls_row>-material.
+      ls_return-message    = 'No Production BOM found'.
+
+      APPEND ls_return TO gt_return.
+      CONTINUE. " If BOM is missing, skip other checks for this row
+    ENDIF.
+
+    READ TABLE gt_stko ASSIGNING FIELD-SYMBOL(<ls_stko>)
+         WITH KEY stlnr = <ls_mast>-stlnr.
+
+    IF sy-subrc = 0 AND <ls_stko>-loekz = 'X'.
+      " ERROR: BOM Exists but is Deleted
+      ls_return-type       = 'E'.
+      ls_return-row        = lv_current_row.
+      ls_return-id         = 'ZBMU_MSG_CLASS'.
+      ls_return-number     = '004'.
+      ls_return-message    = 'BOM is marked for Deletion'.
+      ls_return-message_v1 = <ls_row>-material.
+      APPEND ls_return TO gt_return.
+
+      lv_error_found = abap_true.
+    ENDIF.
+
+    " --- CHECK 2: Is Material Blocked? ---
+    READ TABLE gt_marc ASSIGNING FIELD-SYMBOL(<ls_marc>)
+         WITH KEY matnr = <ls_row>-material
+                  werks = <ls_row>-plant.
+
+    " B) Check Blocking Status (MARC)
+    " RULE: Status must be 70 or lower. Anything > 70 is blocked.
+    IF <ls_marc>-mmsta >= '70'.
+      ls_return-id         = 'ZBMU_MSG_CLASS'.
+      ls_return-number     = '002'.
+      ls_return-message_v1 = <ls_row>-material.
+      ls_return-message    = 'Material Status is too high (>70)'.
+      ls_return-type       = 'E'.
+      ls_return-row        = lv_current_row.
+      APPEND ls_return TO gt_return.
+
+            lv_error_found = abap_true.
+    ENDIF.
+
+    " --- CHECK 1.5: Client Level Status (MARA) ---
+    READ TABLE gt_mara ASSIGNING FIELD-SYMBOL(<ls_mara>)
+         WITH KEY matnr = <ls_row>-material.
+
+    IF sy-subrc = 0.
+
+      " A) Check Client Deletion
+      IF <ls_mara>-lvorm IS NOT INITIAL.
+        ls_return-type       = 'E'.
+        ls_return-row        = lv_current_row.
+        ls_return-id         = 'ZBMU_MSG_CLASS'.
+        ls_return-number     = '005'.
+        ls_return-message    = 'Material is Deleted at Client Level'.
+        ls_return-message_v1 = <ls_row>-material.
+        APPEND ls_return TO gt_return.
+        lv_error_found = abap_true.
+      ENDIF.
+
+      " B) Check Client Status (Blocked > 70)
+      IF <ls_mara>-mstae >= '70'.
+        ls_return-type       = 'E'.
+        ls_return-row        = lv_current_row.
+        ls_return-id         = 'ZBMU_MSG_CLASS'.
+        ls_return-number     = '006'.
+        ls_return-message    = 'Material Blocked at Client Level (>70)'.
+        ls_return-message_v1 = <ls_row>-material.
+        APPEND ls_return TO gt_return.
+        lv_error_found = abap_true.
+      ENDIF.
+
+    ENDIF.
+
+
+
+    " --- YOUR SUCCESS LOGIC (At the bottom) ---
+    IF lv_error_found = abap_false.
+      CLEAR ls_return.
+      ls_return-type       = 'S'.
+      ls_return-row        = lv_current_row.
+      ls_return-id         = 'ZBMU_MSG_CLASS'.
+      ls_return-number     = '000'.
+      ls_return-message    = 'Validation OK'.
+      ls_return-message_v1 = <ls_row>-material.
+      APPEND ls_return TO gt_return.
+    ENDIF.
+
+  ENDLOOP.
+ENDFORM.
