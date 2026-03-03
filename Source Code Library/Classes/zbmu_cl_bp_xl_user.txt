@@ -1,0 +1,526 @@
+CLASS zbmu_cl_bp_xl_user DEFINITION PUBLIC ABSTRACT FINAL FOR BEHAVIOR OF zbmu_i_header.
+ PUBLIC SECTION.
+    TYPES: BEGIN OF gty_bom_xl,
+             Material       TYPE string,
+             Plant          TYPE string,
+             BomUsage       TYPE string,
+             AlternativeBom TYPE string,
+             ChangeNumber   TYPE string,
+             ValidFrom      TYPE string,
+             BomNumber      TYPE string,
+             ItemNode       TYPE string,
+             ItemCounter    TYPE string,
+             ItemNumber     TYPE string,
+             Component      TYPE string,
+             Quantity       TYPE string,
+             UnitOfMeasure  TYPE string,
+             ComponentText  TYPE string,
+             DeleteIndicator TYPE string,
+             ItemCategory   TYPE string,
+             OperationScrap TYPE string,
+             line_number    TYPE string, "Internal Use during Upload
+             line_id        TYPE string, "Internal Use during UploadXLDatamaks_i_xl_user
+           END OF gty_bom_xl.
+
+ENDCLASS.
+
+CLASS zbmu_cl_bp_xl_user IMPLEMENTATION.
+ENDCLASS.
+
+CLASS lhc_XLHead DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PRIVATE SECTION.
+
+    METHODS get_global_authorizations FOR GLOBAL AUTHORIZATION
+      IMPORTING REQUEST requested_authorizations FOR XLHead RESULT result.
+
+    METHODS earlynumbering_create FOR NUMBERING
+      IMPORTING entities FOR CREATE XLHead.
+
+    METHODS uploadExcelData FOR MODIFY
+      IMPORTING keys FOR ACTION XLHead~uploadExcelData RESULT result.
+
+    METHODS FillFileStatus FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR XLHead~FillFileStatus.
+
+    METHODS FillSelectedStatus FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR XLHead~FillSelectedStatus.
+    METHODS DownloadExcel FOR MODIFY
+      IMPORTING keys FOR ACTION XLHead~DownloadExcel RESULT result.
+    METHODS read_excel
+      IMPORTING im_get_template TYPE abap_boolean
+      CHANGING  ch_attachment   TYPE zbmu_file_header-attachment.
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys REQUEST requested_features FOR XLHead RESULT result.
+
+
+ENDCLASS.
+
+CLASS lhc_XLHead IMPLEMENTATION.
+
+  METHOD get_global_authorizations.
+
+    " 1. FOCUS ON 01 (CREATE): Turn on Create and Upload buttons
+    IF requested_authorizations-%create EQ if_abap_behv=>mk-on OR
+       requested_authorizations-%action-uploadExcelData EQ if_abap_behv=>mk-on.
+
+      " Check strictly for 01. Ignore plant entirely.
+      AUTHORITY-CHECK OBJECT 'C_STUE_WRK'
+        ID 'ACTVT' FIELD '01'
+        ID 'WERKS' DUMMY.
+
+      IF sy-subrc = 0.
+        result-%create = if_abap_behv=>auth-allowed.
+        result-%action-uploadExcelData = if_abap_behv=>auth-allowed.
+      ELSE.
+        result-%create = if_abap_behv=>auth-unauthorized.
+        result-%action-uploadExcelData = if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+    " 2. FOCUS ON 02 (CHANGE): Turn on Edit and Delete buttons
+    IF requested_authorizations-%update EQ if_abap_behv=>mk-on OR
+       requested_authorizations-%delete EQ if_abap_behv=>mk-on.
+
+      " Check strictly for 02. Ignore plant entirely.
+      AUTHORITY-CHECK OBJECT 'C_STUE_WRK'
+        ID 'ACTVT' FIELD '02'
+        ID 'WERKS' DUMMY.
+
+      IF sy-subrc = 0.
+        result-%update = if_abap_behv=>auth-allowed.
+        result-%delete = if_abap_behv=>auth-allowed.
+      ELSE.
+        result-%update = if_abap_behv=>auth-unauthorized.
+        result-%delete = if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD earlynumbering_create.
+    DATA(lv_user) = cl_abap_context_info=>get_user_technical_name( ).
+
+    LOOP AT entities ASSIGNING FIELD-SYMBOL(<lfs_entities>).
+      APPEND CORRESPONDING #( <lfs_entities> ) TO mapped-xlhead
+        ASSIGNING FIELD-SYMBOL(<lfs_xlhead>).
+      <lfs_xlhead>-EndUser = lv_user.
+      IF <lfs_xlhead>-FileId IS INITIAL.
+        TRY.
+          <lfs_xlhead>-FileId = cl_system_uuid=>create_uuid_x16_static( ).
+        CATCH cx_uuid_error.
+        ENDTRY.
+      ENDIF.
+
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD get_instance_features.
+
+    " 1. Read the Attachment field for the requested records
+    READ ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE
+      ENTITY XLHead
+      FIELDS ( Attachment )
+      WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_headers).
+
+    " 2. Loop and set permissions
+    result = VALUE #( FOR ls_head IN lt_headers
+                      ( %tky = ls_head-%tky
+
+                        " Condition: If Attachment is NOT empty, Disable. Else, Enable.
+                        %action-DownloadExcel = COND #( WHEN ls_head-Attachment IS NOT INITIAL
+                                                        THEN if_abap_behv=>fc-o-disabled
+                                                        ELSE if_abap_behv=>fc-o-enabled )
+                      ) ).
+
+  ENDMETHOD.
+
+  METHOD uploadExcelData.
+
+    " Define the structure of the Excel data being uploaded (must match your file columns
+
+    DATA: lt_rows TYPE STANDARD TABLE OF string,
+          lv_content TYPE string,
+          lo_table_descr TYPE REF TO cl_abap_tabledescr,
+          lo_struct_descr TYPE REF TO cl_abap_structdescr,
+          lt_excel TYPE STANDARD TABLE OF zbmu_cl_bp_xl_user=>gty_bom_xl,
+          lt_data TYPE TABLE FOR CREATE ZBMU_I_HEADER\_XLData, " Changed entity name
+          lv_index TYPE sy-index.
+
+    FIELD-SYMBOLS: <lfs_col_header> TYPE string.
+
+    DATA(lv_user) = cl_abap_context_info=>get_user_technical_name( ).
+
+    " Read the current file entity to get the attachment
+    READ ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE " Changed entity name
+      ENTITY XLHead
+      ALL FIELDS WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_file_entity).
+
+    DATA(lv_attachment) = lt_file_entity[ 1 ]-Attachment.
+    CHECK lv_attachment IS NOT INITIAL.
+
+    " --- EXCEL READ (XCO) ---
+    DATA(lo_xlsx) = xco_cp_xlsx=>document->for_file_content(
+        iv_file_content = lv_attachment )->read_access( ).
+    DATA(lo_worksheet) = lo_xlsx->get_workbook( )->worksheet->at_position( 1 ).
+    DATA(lo_selection_pattern) = xco_cp_xlsx_selection=>pattern_builder->simple_from_to( )->get_pattern( ).
+    DATA(lo_execute) = lo_worksheet->select(
+        lo_selection_pattern )->row_stream( )->operation->write_to(
+        REF #( lt_excel ) ).
+
+    lo_execute->set_value_transformation(
+        xco_cp_xlsx_read_access=>value_transformation->string_value )->if_xco_xlsx_ra_operation~execute( ).
+
+    " Get number of columns in upload file for validation
+    TRY.
+        lo_table_descr ?= cl_abap_tabledescr=>describe_by_data( p_data = lt_excel ).
+        lo_struct_descr ?= lo_table_descr->get_table_line_type( ).
+        DATA(lv_no_of_cols) = lines( lo_struct_descr->components ).
+      CATCH cx_sy_move_cast_error.
+        " Implement error handling
+    ENDTRY.
+
+    " --- VALIDATION (Check Header Row) ---
+    DATA(ls_excel) = VALUE #( lt_excel[ 1 ] OPTIONAL ).
+    IF ls_excel IS NOT INITIAL.
+      DO lv_no_of_cols TIMES.
+        lv_index = sy-index.
+        ASSIGN COMPONENT lv_index OF STRUCTURE ls_excel TO <lfs_col_header>.
+        CHECK <lfs_col_header> IS ASSIGNED.
+        DATA(lv_value) = to_upper( <lfs_col_header> ).
+        DATA(lv_has_error) = abap_false.
+
+        " NOTE: This is only validating the FIRST 6 COLUMNS
+        CASE lv_index.
+          WHEN 1. lv_has_error = COND #( WHEN lv_value <> 'MATERIAL'          THEN abap_true ELSE lv_has_error ).
+          WHEN 2. lv_has_error = COND #( WHEN lv_value <> 'PLANT'             THEN abap_true ELSE lv_has_error ).
+          WHEN 3. lv_has_error = COND #( WHEN lv_value <> 'BOM USAGE'         THEN abap_true ELSE lv_has_error ).
+          WHEN 4. lv_has_error = COND #( WHEN lv_value <> 'ALTERNATIVE BOM'   THEN abap_true ELSE lv_has_error ).
+          WHEN 5. lv_has_error = COND #( WHEN lv_value <> 'CHANGE NUMBER'     THEN abap_true ELSE lv_has_error ).
+          WHEN 6. lv_has_error = COND #( WHEN lv_value <> 'VALID FROM'        THEN abap_true ELSE lv_has_error ).
+          WHEN 7. lv_has_error = COND #( WHEN lv_value <> 'BOM NUMBER'        THEN abap_true ELSE lv_has_error ).
+          WHEN 8. lv_has_error = COND #( WHEN lv_value <> 'ITEM NODE'         THEN abap_true ELSE lv_has_error ).
+          WHEN 9. lv_has_error = COND #( WHEN lv_value <> 'ITEM COUNTER'      THEN abap_true ELSE lv_has_error ).
+          WHEN 10. lv_has_error = COND #( WHEN lv_value <> 'ITEM NUMBER'      THEN abap_true ELSE lv_has_error ).
+          WHEN 11. lv_has_error = COND #( WHEN lv_value <> 'COMPONENT'        THEN abap_true ELSE lv_has_error ).
+          WHEN 12. lv_has_error = COND #( WHEN lv_value <> 'QUANTITY'         THEN abap_true ELSE lv_has_error ).
+          WHEN 13. lv_has_error = COND #( WHEN lv_value <> 'UNIT OF MEASURE'  THEN abap_true ELSE lv_has_error ).
+          WHEN 14. lv_has_error = COND #( WHEN lv_value <> 'COMPONENT TEXT'   THEN abap_true ELSE lv_has_error ).
+          WHEN 15. lv_has_error = COND #( WHEN lv_value <> 'DELETE INDICATOR' THEN abap_true ELSE lv_has_error ).
+          WHEN 16. lv_has_error = COND #( WHEN lv_value <> 'ITEM CATEGORY'    THEN abap_true ELSE lv_has_error ).
+          WHEN 17. lv_has_error = COND #( WHEN lv_value <> 'OPERATION SCRAP'  THEN abap_true ELSE lv_has_error ).
+          WHEN 20.
+          lv_has_error = abap_true.
+        ENDCASE.
+
+        IF lv_has_error = abap_true.
+          APPEND VALUE #( %tky = lt_file_entity[ 1 ]-%tky ) TO failed-xlhead.
+          APPEND VALUE #(
+              %tky = lt_file_entity[ 1 ]-%tky
+              %msg = new_message_with_text(
+                  severity = if_abap_behv_message=>severity-error
+                  text = 'Wrong File Format!! Check BOM template.' )
+          ) TO reported-xlhead.
+          UNASSIGN <lfs_col_header>.
+          EXIT.
+        ENDIF.
+        UNASSIGN <lfs_col_header>.
+      ENDDO.
+    ENDIF.
+
+    CHECK lv_has_error = abap_false.
+
+    " --- DATA CLEANUP AND PREPARATION ---
+    DELETE lt_excel INDEX 1. " Delete Header row
+    DELETE lt_excel WHERE Material IS INITIAL.
+
+    " Fill Line ID / Line Number
+    LOOP AT lt_excel ASSIGNING FIELD-SYMBOL(<lfs_excel>).
+      TRY.
+          <lfs_excel>-line_id = cl_system_uuid=>create_uuid_x16_static( ).
+        CATCH cx_uuid_error.
+          CONTINUE.
+        ENDTRY.
+      <lfs_excel>-line_number = sy-tabix. " Line Number based on position
+
+      " Clean the date string to YYYYMMDD format (assuming standard separators)
+      REPLACE ALL OCCURRENCES OF '-' IN <lfs_excel>-ValidFrom WITH ''.
+      REPLACE ALL OCCURRENCES OF '/' IN <lfs_excel>-ValidFrom WITH ''.
+      REPLACE ALL OCCURRENCES OF '.' IN <lfs_excel>-ValidFrom WITH ''.
+    ENDLOOP.
+
+    " --- PREPARE DATA FOR CHILD CREATION ---
+    lt_data = VALUE #(
+        ( %cid_ref = keys[ 1 ]-%cid_ref
+            %is_draft = keys[ 1 ]-%is_draft
+            EndUser = keys[ 1 ]-EndUser
+            FileId = keys[ 1 ]-FileId
+            %target = VALUE #(
+                FOR lwa_excel IN lt_excel (
+                  %cid = keys[ 1 ]-%cid_ref
+                  %is_draft = keys[ 1 ]-%is_draft
+                  %data = VALUE #(
+                      EndUser = keys[ 1 ]-EndUser
+                      FileId = keys[ 1 ]-FileId
+                      LineId = lwa_excel-line_id
+                      LineNumber = lwa_excel-line_number
+                      Material = lwa_excel-Material
+                      Plant = lwa_excel-Plant
+                      BomUsage = lwa_excel-BomUsage
+                      AlternativeBom = lwa_excel-AlternativeBom
+                      ChangeNumber = lwa_excel-ChangeNumber
+                      ValidFrom = lwa_excel-ValidFrom
+                      ItemNumber = lwa_excel-ItemNumber
+                      Component = lwa_excel-Component
+                      UnitOfMeasure = lwa_excel-UnitOfMeasure
+                      ItemCategory = lwa_excel-ItemCategory
+                      ComponentText = lwa_excel-ComponentText
+                      Quantity = lwa_excel-Quantity
+                      BomNumber = lwa_excel-BomNumber
+                      ItemNode = lwa_excel-ItemNode
+                      ItemCounter = lwa_excel-ItemCounter
+                      DeleteIndicator = lwa_excel-DeleteIndicator
+                  )
+                  %control = VALUE #(
+                      EndUser = if_abap_behv=>mk-on
+                      FileId = if_abap_behv=>mk-on
+                      LineId = if_abap_behv=>mk-on
+                      LineNumber = if_abap_behv=>mk-on
+                      Material = if_abap_behv=>mk-on
+                      Plant = if_abap_behv=>mk-on
+                      BomUsage = if_abap_behv=>mk-on
+                      AlternativeBom = if_abap_behv=>mk-on
+                      ChangeNumber = if_abap_behv=>mk-on
+                      ValidFrom = if_abap_behv=>mk-on
+                      ItemNumber = if_abap_behv=>mk-on
+                      Component = if_abap_behv=>mk-on
+                      UnitOfMeasure = if_abap_behv=>mk-on
+                      ItemCategory = if_abap_behv=>mk-on
+                      ComponentText = if_abap_behv=>mk-on
+                      Quantity = if_abap_behv=>mk-on
+                      BomNumber = if_abap_behv=>mk-on
+                      ItemNode = if_abap_behv=>mk-on
+                      ItemCounter = if_abap_behv=>mk-on
+                      DeleteIndicator = if_abap_behv=>mk-on
+                  )
+              )
+          )
+        )
+    ).
+
+    " --- DELETE EXISTING AND CREATE NEW DATA ---
+
+    " Delete Existing entry for user if any
+    READ ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE " Changed entity name
+      ENTITY XLHead BY \_XLData
+      ALL FIELDS WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_existing_XLData).
+
+    IF lt_existing_XLData IS NOT INITIAL.
+      MODIFY ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE " Changed entity name
+        ENTITY XLData DELETE FROM VALUE #(
+            FOR lwa_data IN lt_existing_XLData (
+                %key = lwa_data-%key
+                %is_draft = lwa_data-%is_draft
+            )
+        )
+        MAPPED DATA(lt_del_mapped)
+        REPORTED DATA(lt_del_reported)
+        FAILED DATA(lt_del_failed).
+    ENDIF.
+
+    " Add New Entry for XLData (association)
+    MODIFY ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE " Changed entity name
+      ENTITY XLHead CREATE BY \_XLData
+      AUTO FILL CID WITH lt_data.
+
+    " Modify Status
+    MODIFY ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE " Changed entity name
+      ENTITY XLHead
+      UPDATE FROM VALUE #( (
+          %tky = lt_file_entity[ 1 ]-%tky
+          FileStatus = 'File Uploaded'
+          %control-FileStatus = if_abap_behv=>mk-on ) )
+      MAPPED DATA(lt_upd_mapped)
+      FAILED DATA(lt_upd_failed)
+      REPORTED DATA(lt_upd_reported).
+
+    " Read Updated Entry
+    READ ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE " Changed entity name
+      ENTITY XLHead ALL FIELDS WITH CORRESPONDING #( Keys )
+      RESULT DATA(lt_updated_XLHead).
+
+    " Send Status back to front end
+    result = VALUE #(
+        FOR lwa_upd_head IN lt_updated_XLHead (
+            %tky = lwa_upd_head-%tky
+            %param = lwa_upd_head
+        )
+    ).
+
+  ENDMETHOD.
+
+  METHOD FillFileStatus.
+       "Read the data to be modified
+        READ ENTITIES OF zbmu_i_header IN LOCAL MODE
+        ENTITY XlHead FIELDS ( EndUser FileStatus )
+        WITH CORRESPONDING #( keys )
+        RESULT DATA(lt_user).
+
+       "Update File Status
+        LOOP AT lt_user INTO DATA(ls_user).
+        MODIFY ENTITIES OF zbmu_i_header IN LOCAL MODE
+        ENTITY XLHead
+        UPDATE FIELDS ( FileStatus )
+        WITH VALUE #( (
+            %tky                  = ls_user-%tky
+            %data-FileStatus      = 'File Not Selected'
+            %control-FileStatus   = if_abap_behv=>mk-on
+            ) ).
+         ENDLOOP.
+  ENDMETHOD.
+
+  METHOD FillSelectedStatus.
+    "Delete XLDATA Existing (if any)
+  READ ENTITIES of zbmu_i_header IN LOCAL MODE
+  ENTITY XLHead BY \_XLData
+  ALL FIELDS WITH CORRESPONDING #( keys )
+  RESULT DATA(lt_existing_XLData).
+
+  IF lt_existing_xldata IS NOT INITIAL.
+    MODIFY ENTITIES OF zbmu_i_header IN LOCAL MODE
+    ENTITY XLData DELETE FROM VALUE #(
+      FOR lwa_data IN lt_existing_XLData (
+        %key        = lwa_data-%key
+        %is_draft   = lwa_data-%is_draft ) ).
+  ENDIF.
+
+  "Read XL_Head Entities and change file status
+  READ ENTITIES OF zbmu_i_header IN LOCAL MODE
+  ENTITY XLHead ALL FIELDS WITH CORRESPONDING #( keys )
+  RESULT DATA(lt_xlhead).
+
+  "Update File Status
+  LOOP AT lt_xlhead INTO DATA(ls_xlhead).
+    MODIFY ENTITIES OF zbmu_i_header IN LOCAL MODE
+    ENTITY XLHead
+    UPDATE FIELDS ( FileStatus )
+    WITH VALUE #( (
+        %tky                  = ls_xlhead-%tky
+        %data-FileStatus      = COND #(
+                                  WHEN ls_xlhead-Attachment IS INITIAL
+                  THEN 'File Not Selected'
+                  ELSE 'File Selected' )
+        %control-FileStatus   = if_abap_behv=>mk-on
+        ) ).
+  ENDLOOP.
+
+ENDMETHOD.
+
+
+
+METHOD DownloadExcel.
+    DATA: lv_file_content TYPE zbmu_file_header-attachment.
+
+    " 1. Call Helper to Generate Excel
+    me->read_excel(
+      EXPORTING
+        im_get_template = 'X'
+      CHANGING
+        ch_attachment   = lv_file_content
+    ).
+
+    " 2. Update the Draft Record
+    " CRITICAL FIX: We use %tky instead of Semantic Keys because this is a Draft
+    MODIFY ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE
+      ENTITY XLHead
+      UPDATE FROM VALUE #( FOR ls_key IN keys
+         (
+           %tky                = ls_key-%tky    " <--- THIS IS THE FIX
+           Attachment          = lv_file_content
+           Filename            = 'BOM_Template.xlsx'
+           Mimetype            = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+           %control-Attachment = if_abap_behv=>mk-on
+           %control-Filename   = if_abap_behv=>mk-on
+           %control-Mimetype   = if_abap_behv=>mk-on
+         ) )
+      MAPPED DATA(ls_mapped_update)
+      REPORTED DATA(ls_reported_update)
+      FAILED DATA(ls_failed_update).
+
+    " 3. Return Result to UI (Required so the button stops spinning)
+    READ ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE
+      ENTITY XLHead
+      ALL FIELDS WITH CORRESPONDING #( Keys )
+      RESULT DATA(lt_User).
+
+    result = VALUE #( FOR ls_upd_user IN lt_User
+                      ( %tky   = ls_upd_user-%tky
+                        %param = ls_upd_user ) ).
+
+    " 4. Success Message
+    IF ls_failed_update IS INITIAL.
+      reported = VALUE #( BASE reported
+        xlhead = VALUE #( ( %tky = keys[ 1 ]-%tky
+                            %msg = new_message_with_text(
+                                     severity = if_abap_behv_message=>severity-success
+                                     text = 'BOM Template Generated.' )
+                         ) ) ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD read_excel.
+    DATA: lt_excel        TYPE STANDARD TABLE OF zbmu_cl_bp_xl_user=>gty_bom_xl,
+          lo_worksheet_wa TYPE REF TO if_xco_xlsx_wa_worksheet.
+
+    " Only running Template Logic (lv_row = 1) based on your needs
+    IF im_get_template = 'X'.
+      lt_excel = VALUE #( (
+         Material        = 'MATERIAL'
+         Plant           = 'PLANT'
+         BomUsage        = 'BOM USAGE'
+         AlternativeBom  = 'ALTERNATIVE BOM'
+         ChangeNumber    = 'CHANGE NUMBER'
+         ValidFrom       = 'VALID FROM'
+         BomNumber       = 'BOM NUMBER'
+         ItemNode        = 'ITEM NODE'
+         ItemCounter     = 'ITEM COUNTER'
+         ItemNumber      = 'ITEM NUMBER'
+         Component       = 'COMPONENT'
+         Quantity        = 'QUANTITY'
+         UnitOfMeasure   = 'UNIT OF MEASURE'
+         ComponentText   = 'COMPONENT TEXT'
+         DeleteIndicator = 'DELETE INDICATOR'
+         ItemCategory    = 'ITEM CATEGORY'
+         OperationScrap  = 'OPERATION SCRAP'
+       ) ).
+
+      TRY.
+          " XCO Library Logic
+          DATA(lo_write_access) = xco_cp_xlsx=>document->empty( )->write_access( ).
+          lo_worksheet_wa = lo_write_access->get_workbook( )->worksheet->at_position( 1 ).
+
+          DATA(lo_selection_pattern) = xco_cp_xlsx_selection=>pattern_builder->simple_from_to(
+                                       )->from_row( xco_cp_xlsx=>coordinate->for_numeric_value( 1 )
+                                       )->get_pattern( ).
+
+          lo_worksheet_wa->select( lo_selection_pattern
+            )->row_stream(
+            )->operation->write_from( REF #( lt_excel )
+            )->execute( ).
+
+          ch_attachment = lo_write_access->get_file_content( ).
+
+        CATCH cx_root.
+          " Catch XCO errors if library is missing
+      ENDTRY.
+    ENDIF.
+  ENDMETHOD.
+
+
+
+ENDCLASS.
