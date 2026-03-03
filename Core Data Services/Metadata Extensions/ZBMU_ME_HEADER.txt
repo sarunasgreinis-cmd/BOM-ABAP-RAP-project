@@ -1,0 +1,68 @@
+@Metadata.layer: #CORE
+@UI.headerInfo: { 
+    typeName: 'User file',
+    typeNamePlural: 'User Files'
+    /*title: {  type: #STANDARD, value: 'FileId' } */
+}
+annotate entity ZBMU_P_HEADER with 
+{ 
+  /* --- FACETS --- */
+  @UI.facet: [
+  {  id: 'idEndUser',             purpose: #HEADER,   position: 10,
+     type: #DATAPOINT_REFERENCE,  targetQualifier: 'tqEndUser'
+  },
+  {  id: 'idChgAt',               purpose: #HEADER,   position: 20,
+     type: #DATAPOINT_REFERENCE,  targetQualifier: 'tqChgAt'
+  },
+  {  id: 'idStatus',              purpose: #HEADER,   position: 30,
+     type: #DATAPOINT_REFERENCE,  targetQualifier: 'tqStatus'
+  },
+  {  
+     id: 'idFile',              purpose: #STANDARD,   position: 50,
+     label: 'File Upload',      type: #IDENTIFICATION_REFERENCE  
+  },
+  {  
+     id: 'idData',              purpose: #STANDARD,   position: 60,
+     label: 'Excel Data',      type: #LINEITEM_REFERENCE,
+     targetElement: '_XLData'
+  }
+
+  ]
+  
+  /* --- FIELDS --- */
+  
+  @UI.dataPoint: {  qualifier: 'tqEndUser', title: 'User Id' }
+  @UI.identification: [ 
+    { type: #FOR_ACTION, label: 'Upload Data', dataAction: 'uploadExcelData', position: 10 },
+    { type: #FOR_ACTION, label: 'Download Template', dataAction: 'DownloadExcel', position: 20 }
+]
+  @UI.lineItem: [ { position: 10, label: 'User Id' } ]
+  EndUser;
+
+  @UI.lineItem: [{ position: 20, label: 'File Status', criticality: 'FileStatus' } ]
+  @UI.dataPoint: {  qualifier: 'tqStatus', title: 'File Status'}
+  FileStatus;
+
+  @UI.identification: [{ position: 30, label: 'Select Excel File to Upload'} ]
+  Attachment;
+  
+  @UI.hidden: true 
+  Mimetype; 
+  
+  @UI.lineItem: [{ position: 40, label: 'Filename'} ]
+  Filename;
+  
+  @UI.hidden: true 
+  LocalCreatedBy;
+  @UI.hidden: true 
+  LocalCreatedAt;
+  @UI.hidden: true 
+  LocalLastChangedBy; 
+  @UI.hidden: true
+  LocalLastChangedAt;  
+
+  /* FIX 2: Added the missing DataPoint definition for the Header Facet */
+  @UI.dataPoint: { qualifier: 'tqChgAt', title: 'Last Changed' }
+  @UI.hidden: true
+  LastChangedAt;
+}
