@@ -1,0 +1,33 @@
+@EndUserText.label : 'Draft table for entity ZBMU_STAGING_BOM'
+@AbapCatalog.enhancement.category : #EXTENSIBLE_ANY
+@AbapCatalog.tableCategory : #TRANSPARENT
+@AbapCatalog.deliveryClass : #A
+@AbapCatalog.dataMaintenance : #RESTRICTED
+define table zbmu_staging_dr {
+
+  key enduser      : syuname not null;
+  key fileid       : sysuuid_x16 not null;
+  key lineid       : sysuuid_x16 not null;
+  key linenumber   : abap.numc(10) not null;
+  material         : matnr;
+  plant            : werks_d;
+  bomusage         : stlan;
+  alternativebom   : stlal;
+  changenumber     : aennr;
+  validfrom        : abap.char(10);
+  itemnumber       : posnr_d;
+  component        : idnrk;
+  unitofmeasure    : abap.char(3);
+  itemcategory     : postp;
+  componenttext    : postx;
+  quantity         : abap.char(18);
+  bomnumber        : abap.char(8);
+  itemnode         : abap.char(8);
+  itemcounter      : abap.char(8);
+  deleteindicator  : abap.char(1);
+  operationscrap   : abap.char(5);
+  processingstatus : abap.char(1);
+  logmessage       : abap.char(255);
+  "%admin"         : include sych_bdl_draft_admin_inc;
+
+}
