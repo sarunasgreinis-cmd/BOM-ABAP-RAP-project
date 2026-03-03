@@ -1,0 +1,24 @@
+@EndUserText.label : 'Structure for BOM Upload Logic'
+@AbapCatalog.enhancement.category : #NOT_EXTENSIBLE
+define structure zbmu_s_bom_data {
+
+  line_no         : abap.numc(10);
+  material        : matnr;
+  plant           : werks_d;
+  bomusage        : stlan;
+  alternativebom  : stlal;
+  changenumber    : aennr;
+  validfrom       : abap.char(10);
+  itemnumber      : posnr_d;
+  component       : idnrk;
+  unitofmeasure   : abap.char(3);
+  itemcategory    : postp;
+  componenttext   : postx;
+  quantity        : abap.char(18);
+  bomnumber       : abap.char(8);
+  itemnode        : abap.char(8);
+  itemcounter     : abap.char(8);
+  deleteindicator : abap.char(1);
+  operationscrap  : abap.char(5);
+
+}
