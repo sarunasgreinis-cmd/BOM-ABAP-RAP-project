@@ -1,0 +1,195 @@
+CLASS zbmu_cl_bp_xl_data DEFINITION PUBLIC ABSTRACT FINAL FOR BEHAVIOR OF zbmu_i_header.
+ENDCLASS.
+
+CLASS zbmu_cl_bp_xl_data IMPLEMENTATION.
+ENDCLASS.
+
+CLASS lhc_XLData DEFINITION INHERITING FROM cl_abap_behavior_handler.
+
+  PUBLIC SECTION.
+    DATA: gt_return            TYPE bapirettab,
+          gv_response_received TYPE abap_bool.
+
+    METHODS: fill_errors IMPORTING p_task TYPE clike.
+
+  PRIVATE SECTION.
+    METHODS get_global_authorizations FOR GLOBAL AUTHORIZATION
+      IMPORTING REQUEST requested_authorizations FOR XLData RESULT result.
+
+    METHODS processData FOR MODIFY
+      IMPORTING keys FOR ACTION XLData~processData RESULT result.
+
+ENDCLASS.
+
+CLASS lhc_XLData IMPLEMENTATION.
+
+  METHOD get_global_authorizations.
+  ENDMETHOD.
+
+
+
+METHOD processData.
+    DATA: lt_xldata TYPE ZBMU_TT_MAT_DOC.
+    DATA: lt_update_buffer TYPE TABLE FOR UPDATE ZBMU_I_HEADER\\XLData.
+
+
+    READ ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE
+      ENTITY XLData
+      ALL FIELDS WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_selected_lines).
+
+    " 1. Read Selected Lines
+
+    IF lt_selected_lines IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    " 2. MAP DATA (No Grouping - Just Copy All)
+    lt_xldata = VALUE #(
+
+        FOR ls_row IN lt_selected_lines (
+
+         line_no         = ls_row-LineNumber
+         material        = ls_row-Material
+         plant           = ls_row-Plant
+         bomusage        = ls_row-BomUsage
+         alternativebom  = ls_row-AlternativeBom
+         changenumber    = ls_row-ChangeNumber
+         validfrom       = ls_row-ValidFrom
+         itemnumber      = ls_row-ItemNumber
+         component       = ls_row-Component
+         quantity        = ls_row-Quantity
+         unitofmeasure   = ls_row-UnitOfMeasure
+         itemcategory    = ls_row-ItemCategory
+         componenttext   = ls_row-ComponentText
+         bomnumber       = ls_row-BomNumber
+         itemnode        = ls_row-ItemNode
+         itemcounter     = ls_row-ItemCounter
+         deleteindicator = ls_row-DeleteIndicator
+         operationscrap  = ls_row-OperationScrap
+        ) ).
+
+
+CLEAR: gt_return, gv_response_received.
+
+
+    " 3. CALL FUNCTION MODULE (Passes ALL data at once)
+CALL FUNCTION 'ZBMU_FM_MAT_DOC_BAPI'
+      STARTING NEW TASK 'BOM_VAL'
+      DESTINATION 'NONE'
+      CALLING fill_errors ON END OF TASK
+      EXPORTING
+        it_xldata = lt_xldata.
+WAIT FOR ASYNCHRONOUS TASKS UNTIL gv_response_received = abap_true.
+
+
+LOOP AT lt_selected_lines ASSIGNING FIELD-SYMBOL(<ls_row>).
+
+  DATA(lv_current_row_index) = sy-tabix.
+  IF lv_current_row_index = 0. lv_current_row_index = 1. ENDIF.
+
+  " 1. Define Variables
+  DATA: lv_status TYPE c LENGTH 1.
+  DATA: lv_msg    TYPE string.
+
+  " 2. Defaults
+  lv_status = '3'.
+  lv_msg    = 'Success'.
+
+  " 3. Scan Returns
+  LOOP AT gt_return INTO DATA(ls_ret) WHERE row = lv_current_row_index.
+
+    CASE ls_ret-type.
+      WHEN 'E' OR 'A'.
+        lv_status = '1'.
+        lv_msg    = ls_ret-message.
+        EXIT.
+
+      WHEN 'W'.
+        IF lv_status <> '1'.
+          lv_status = '2'.
+          lv_msg    = ls_ret-message.
+        ENDIF.
+
+      WHEN 'S'.  " <--- ADD THIS BLOCK
+        " Only update if we haven't found an Error or Warning yet
+        IF lv_status = '3'.
+           lv_msg = ls_ret-message. " Capture the real Success message
+        ENDIF.
+    ENDCASE.
+  ENDLOOP.
+
+  " 4. Update Database Buffer (Prints 'Error' or 'Success' to the column)
+  APPEND VALUE #(
+    %tky             = <ls_row>-%tky
+    ProcessingStatus = lv_status
+    LogMessage       = lv_msg
+  ) TO lt_update_buffer.
+
+
+
+ENDLOOP.
+
+" 7. SAVE TO DB
+
+IF lt_update_buffer IS NOT INITIAL.
+
+MODIFY ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE
+
+ENTITY XLData
+
+UPDATE FIELDS ( ProcessingStatus LogMessage )
+
+WITH lt_update_buffer.
+
+
+ENDIF.
+
+
+
+" 8. RETURN RESULT TO UI
+
+READ ENTITIES OF ZBMU_I_HEADER IN LOCAL MODE
+
+ENTITY XLData
+
+ALL FIELDS WITH CORRESPONDING #( keys )
+
+RESULT DATA(lt_updated).
+
+
+
+result = VALUE #( FOR ls_res IN lt_updated ( %tky = ls_res-%tky %param = ls_res ) ).
+
+
+
+ENDMETHOD.
+
+  " =========================================================
+  " CALLBACK METHOD (Receives Data from Background Task)
+  " =========================================================
+  METHOD fill_errors.
+    DATA: lt_return_local TYPE bapirettab.
+
+    IF p_task = 'BOM_VAL'.
+      RECEIVE RESULTS FROM FUNCTION 'ZBMU_FM_MAT_DOC_BAPI'
+        IMPORTING
+          et_return = lt_return_local
+        EXCEPTIONS
+          system_failure        = 1
+          communication_failure = 2
+          resource_failure      = 3.
+
+      IF sy-subrc = 0.
+        gt_return = lt_return_local.
+      ELSE.
+        " Handle Crash inside the Task
+        APPEND VALUE #( type = 'E' message = 'Technical Error in Background Task' ) TO gt_return.
+      ENDIF.
+
+      " This flag tells the WAIT command in processData to wake up
+      gv_response_received = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.
