@@ -1,0 +1,37 @@
+@EndUserText.label : 'BOM Upload: Staging Table'
+@AbapCatalog.enhancement.category : #NOT_EXTENSIBLE
+@AbapCatalog.tableCategory : #TRANSPARENT
+@AbapCatalog.deliveryClass : #A
+@AbapCatalog.dataMaintenance : #RESTRICTED
+define table zbmu_staging_bom {
+
+  key end_user     : syuname not null;
+  @AbapCatalog.foreignKey.label : 'Link to File Header'
+  @AbapCatalog.foreignKey.screenCheck : true
+  key file_id      : sysuuid_x16 not null
+    with foreign key zbmu_file_header
+      where end_user = zbmu_staging_bom.end_user
+        and file_id = zbmu_staging_bom.file_id;
+  key line_id      : sysuuid_x16 not null;
+  key line_no      : abap.numc(10) not null;
+  material         : matnr;
+  plant            : werks_d;
+  bomusage         : stlan;
+  alternativebom   : stlal;
+  changenumber     : aennr;
+  validfrom        : abap.char(10);
+  itemnumber       : posnr_d;
+  component        : idnrk;
+  unitofmeasure    : abap.char(3);
+  itemcategory     : postp;
+  componenttext    : postx;
+  quantity         : abap.char(18);
+  bomnumber        : abap.char(8);
+  itemnode         : abap.char(8);
+  itemcounter      : abap.char(8);
+  deleteindicator  : abap.char(1);
+  operationscrap   : abap.char(5);
+  processingstatus : abap.char(1);
+  logmessage       : abap.char(255);
+
+}
