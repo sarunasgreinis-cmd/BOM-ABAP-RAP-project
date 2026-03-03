@@ -1,0 +1,87 @@
+@Metadata.layer: #CORE
+@UI.headerInfo: {
+    typeName: 'File Data',
+    typeNamePlural: 'File Data',
+    title: { type: #STANDARD, value: 'EndUser' },
+    description: { type: #STANDARD, value: 'FileId' }
+}
+annotate entity ZBMU_P_STAGING with
+{
+  /* --- ACTIONS --- */
+  @UI.hidden: true
+  @UI.lineItem: [
+    { type: #FOR_ACTION, label: 'Process Data', dataAction: 'processData', invocationGrouping: #CHANGE_SET }
+  ]
+  EndUser;
+
+  @UI.hidden: true
+  FileId;
+
+  /* --- STATUS COLUMN (Position 1 - Leftmost) --- */
+  /* Shows Traffic Light Icon based on value (1=Red, 2=Yellow, 3=Green) */
+  @UI.lineItem: [{ position: 1, label: 'Status', criticality: 'ProcessingStatus', criticalityRepresentation: #WITHOUT_ICON, importance: #HIGH }]
+  ProcessingStatus;
+
+  /* --- DATA COLUMNS --- */
+  
+  /* Position 5: The Excel Line Number */
+  @UI.lineItem: [{ position: 5, label: 'Line' }]
+  LineNumber;
+
+  @UI.lineItem: [{ position: 10, label: 'Material', importance: #HIGH }]
+  Material;
+
+  @UI.lineItem: [{ position: 20, label: 'Plant' }]
+  Plant;
+
+  @UI.lineItem: [{ position: 30, label: 'BOM Usage' }]
+  BomUsage;
+
+  @UI.lineItem: [{ position: 40, label: 'Alt. BOM' }]
+  AlternativeBom;
+
+  @UI.lineItem: [{ position: 50, label: 'Change No.' }]
+  ChangeNumber;
+
+  @UI.lineItem: [{ position: 60, label: 'Valid From' }]
+  ValidFrom;
+
+  @UI.lineItem: [{ position: 70, label: 'Item No.' }]
+  ItemNumber;
+
+  @UI.lineItem: [{ position: 80, label: 'Component', importance: #HIGH }]
+  Component;
+
+  @UI.lineItem: [{ position: 85, label: 'Comp. Description' }]
+  ComponentText;
+
+  @UI.lineItem: [{ position: 90, label: 'Quantity' }]
+  Quantity;
+
+  @UI.lineItem: [{ position: 100, label: 'UoM' }]
+  UnitOfMeasure;
+
+  @UI.lineItem: [{ position: 110, label: 'Item Cat.' }]
+  ItemCategory;
+
+  @UI.lineItem: [{ position: 120, label: 'Scrap %' }]
+  OperationScrap;
+
+  @UI.lineItem: [{ position: 130, label: 'Del. Flag' }]
+  DeleteIndicator;
+
+  /* --- MESSAGE COLUMN (Position 140 - Rightmost) --- */
+  /* The text turns Red/Green matching the status icon */
+  @UI.lineItem: [{ position: 140, label: 'Processing Log', criticality: 'ProcessingStatus', importance: #HIGH }]
+  LogMessage;
+
+  /* --- HIDDEN TECHNICAL FIELDS --- */
+  @UI.hidden: true
+  BomNumber;
+  @UI.hidden: true
+  ItemNode;
+  @UI.hidden: true
+  ItemCounter;
+  @UI.hidden: true
+  _XLUser;
+}
