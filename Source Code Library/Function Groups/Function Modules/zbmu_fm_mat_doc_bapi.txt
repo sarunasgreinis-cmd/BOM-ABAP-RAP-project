@@ -1,0 +1,53 @@
+FUNCTION zbmu_fm_mat_doc_bapi
+  IMPORTING
+    VALUE(it_xldata) TYPE zbmu_tt_mat_doc
+  EXPORTING
+    VALUE(et_return) TYPE bapirettab.
+
+
+
+
+  " 2. MAINTENANCE PHASE SETUP
+  " **FIX: Clear the message table to ensure only maintenance messages are collected.**
+  REFRESH: gt_return.
+
+  gt_xldata = it_xldata.
+
+  PERFORM validate_data USING it_xldata.
+
+  " A. Check: Is there at least one Error?
+  LOOP AT gt_return TRANSPORTING NO FIELDS WHERE type = 'E' OR type = 'A'.
+    DATA(lv_process_failed) = abap_true.
+    EXIT.
+  ENDLOOP.
+
+  " B. If YES, change all the 'Success' messages to 'Warnings'
+  IF lv_process_failed = abap_true.
+
+    LOOP AT gt_return ASSIGNING FIELD-SYMBOL(<ls_msg>) WHERE type = 'S'.
+      <ls_msg>-type    = 'W'.  " Turn Green to Yellow
+      <ls_msg>-message = 'Validation OK (Data NOT Processed due to errors in file)'.
+    ENDLOOP.
+
+    " C. STOP THE PROCESS
+    et_return = gt_return.
+    RETURN.
+  ENDIF.
+
+  "Deleted part
+  "IF gt_return IS NOT INITIAL.
+  "  et_return = gt_return.
+  "  RETURN.
+  "ENDIF.
+
+  PERFORM execute_bom_maintain.
+
+  " 3. FINAL MESSAGE EXPORT
+  " Check for maintenance errors (or success messages) and export them
+  IF gt_return IS NOT INITIAL.
+    et_return = gt_return.
+    RETURN.
+  ENDIF. " You can use the template 'functionModuleParameter' to add here the signature!
+
+
+ENDFUNCTION.
