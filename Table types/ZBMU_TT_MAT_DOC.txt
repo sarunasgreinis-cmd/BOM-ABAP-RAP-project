@@ -1,0 +1,5 @@
+Raw type
+
+Category: Dictionary Type 
+Type Name*: ZBMU_S_BOM_DATA  
+
