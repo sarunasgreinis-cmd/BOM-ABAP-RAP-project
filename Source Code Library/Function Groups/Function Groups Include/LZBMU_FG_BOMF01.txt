@@ -1,0 +1,552 @@
+FORM validate_data USING it_xldata TYPE zbmu_tt_mat_doc.
+
+ TYPES: BEGIN OF lty_keys_mat,
+           matnr TYPE matnr,
+           werks TYPE werks_d,
+           stlal TYPE stalt,
+         END OF lty_keys_mat.
+
+  TYPES: BEGIN OF lty_mast_data,
+           matnr TYPE mast-matnr,
+           werks TYPE mast-werks,
+           stlnr TYPE mast-stlnr,
+           stlal TYPE mast-stlal,
+         END OF lty_mast_data.
+
+  TYPES: BEGIN OF lty_marc_data,
+           matnr TYPE marc-matnr,
+           werks TYPE marc-werks,
+           mmsta TYPE marc-mmsta,
+         END OF lty_marc_data.
+
+  TYPES: BEGIN OF lty_stko_data,
+           stlnr TYPE stko-stlnr,
+           stlal TYPE stko-stlal,
+           loekz TYPE stko-loekz, " <--- The Deletion Flag
+         END OF lty_stko_data.
+
+  DATA: gt_stko TYPE STANDARD TABLE OF lty_stko_data.
+
+  DATA: gt_keys_mat TYPE STANDARD TABLE OF lty_keys_mat,
+        gt_mast     TYPE STANDARD TABLE OF lty_mast_data,
+        gt_marc     TYPE STANDARD TABLE OF lty_marc_data,
+        ls_return   TYPE bapiret2.
+
+  TYPES: BEGIN OF lty_mara_data,
+           matnr TYPE mara-matnr,
+           mstae TYPE mara-mstae, " Cross-Plant Status
+           lvorm TYPE mara-lvorm, " Client Deletion Flag
+         END OF lty_mara_data.
+
+  DATA: gt_mara TYPE STANDARD TABLE OF lty_mara_data.
+
+
+  LOOP AT it_xldata ASSIGNING FIELD-SYMBOL(<ls_fix>).
+    CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+      EXPORTING
+        input        = <ls_fix>-material
+      IMPORTING
+        output       = <ls_fix>-material
+      EXCEPTIONS
+        length_error = 1
+        OTHERS       = 2.
+  ENDLOOP.
+
+  " 2. PREPARATION: Collect Keys for Bulk Fetch
+  " -------------------------------------------
+  " We extract just the material/plant to ask the DB effectively
+  gt_keys_mat = VALUE #( FOR lwa_data IN it_xldata
+                         ( matnr = lwa_data-material
+                           werks = lwa_data-plant
+                           stlal = lwa_data-alternativebom ) ).
+
+  SORT gt_keys_mat BY matnr werks.
+  DELETE ADJACENT DUPLICATES FROM gt_keys_mat COMPARING matnr werks.
+
+  " Safety check: If list is empty, exit to avoid full DB scan
+  IF gt_keys_mat IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " 3. DATABASE FETCH (Hit DB only twice)
+  " -------------------------------------
+
+  " A) Check BOMs (MAST)
+  SELECT matnr, werks, stlnr, stlal
+    FROM mast
+    FOR ALL ENTRIES IN @gt_keys_mat
+    WHERE matnr = @gt_keys_mat-matnr
+      AND werks = @gt_keys_mat-werks
+      AND stlal = @gt_keys_mat-stlal
+      AND stlan = '1' " Production BOM
+    INTO TABLE @gt_mast.
+
+
+  " NEW: Get Deletion Status for the BOMs we just found
+  IF gt_mast IS NOT INITIAL.
+    SELECT stlnr, stlal, loekz
+      FROM stko
+      FOR ALL ENTRIES IN @gt_mast
+      WHERE stlnr = @gt_mast-stlnr
+      INTO TABLE @gt_stko.
+  ENDIF.
+
+  " B) Check Blocking Status (MARC)
+  SELECT matnr, werks, mmsta
+    FROM marc
+    FOR ALL ENTRIES IN @gt_keys_mat
+    WHERE matnr = @gt_keys_mat-matnr
+      AND werks = @gt_keys_mat-werks
+    INTO TABLE @gt_marc.
+
+  " C) Check Client Level Status (MARA)
+  SELECT matnr, mstae, lvorm
+    FROM mara
+    FOR ALL ENTRIES IN @gt_keys_mat
+    WHERE matnr = @gt_keys_mat-matnr
+    INTO TABLE @gt_mara.
+
+
+  " 4. VALIDATION LOOP (Process row by row)
+  " ---------------------------------------
+  LOOP AT it_xldata ASSIGNING FIELD-SYMBOL(<ls_row>).
+
+    " !!! CRITICAL FOR YOUR RAP APP !!!
+    " We capture the current loop index (1, 2, 3...)
+    " This allows your RAP code to match the error to the correct line.
+    DATA(lv_current_row) = sy-tabix.
+
+    DATA(lv_error_found) = abap_false.
+
+    " --- CHECK 1: Does BOM Exist? ---
+    READ TABLE gt_mast ASSIGNING FIELD-SYMBOL(<ls_mast>)
+         WITH KEY matnr = <ls_row>-material
+                  werks = <ls_row>-plant.
+
+    IF sy-subrc <> 0.
+      CLEAR ls_return.
+      ls_return-type       = 'E'.
+      ls_return-row        = lv_current_row. " <--- THIS MAPS TO RAP
+      ls_return-id         = 'ZBMU_MSG_CLASS'. " Change to your Msg Class
+      ls_return-number     = '001'.
+      ls_return-message_v1 = <ls_row>-material.
+      ls_return-message    = 'No Production BOM found'.
+
+      APPEND ls_return TO gt_return.
+      CONTINUE. " If BOM is missing, skip other checks for this row
+    ENDIF.
+
+    READ TABLE gt_stko ASSIGNING FIELD-SYMBOL(<ls_stko>)
+         WITH KEY stlnr = <ls_mast>-stlnr.
+
+    IF sy-subrc = 0 AND <ls_stko>-loekz = 'X'.
+      " ERROR: BOM Exists but is Deleted
+      ls_return-type       = 'E'.
+      ls_return-row        = lv_current_row.
+      ls_return-id         = 'ZBMU_MSG_CLASS'.
+      ls_return-number     = '004'.
+      ls_return-message    = 'BOM is marked for Deletion'.
+      ls_return-message_v1 = <ls_row>-material.
+      APPEND ls_return TO gt_return.
+
+      lv_error_found = abap_true.
+    ENDIF.
+
+    " --- CHECK 2: Is Material Blocked? ---
+    READ TABLE gt_marc ASSIGNING FIELD-SYMBOL(<ls_marc>)
+         WITH KEY matnr = <ls_row>-material
+                  werks = <ls_row>-plant.
+
+    " B) Check Blocking Status (MARC)
+    " RULE: Status must be 70 or lower. Anything > 70 is blocked.
+    IF <ls_marc>-mmsta >= '70'.
+      ls_return-id         = 'ZBMU_MSG_CLASS'.
+      ls_return-number     = '002'.
+      ls_return-message_v1 = <ls_row>-material.
+      ls_return-message    = 'Material Status is too high (>70)'.
+      ls_return-type       = 'E'.
+      ls_return-row        = lv_current_row.
+      APPEND ls_return TO gt_return.
+
+            lv_error_found = abap_true.
+    ENDIF.
+
+    " --- CHECK 1.5: Client Level Status (MARA) ---
+    READ TABLE gt_mara ASSIGNING FIELD-SYMBOL(<ls_mara>)
+         WITH KEY matnr = <ls_row>-material.
+
+    IF sy-subrc = 0.
+
+      " A) Check Client Deletion
+      IF <ls_mara>-lvorm IS NOT INITIAL.
+        ls_return-type       = 'E'.
+        ls_return-row        = lv_current_row.
+        ls_return-id         = 'ZBMU_MSG_CLASS'.
+        ls_return-number     = '005'.
+        ls_return-message    = 'Material is Deleted at Client Level'.
+        ls_return-message_v1 = <ls_row>-material.
+        APPEND ls_return TO gt_return.
+        lv_error_found = abap_true.
+      ENDIF.
+
+      " B) Check Client Status (Blocked > 70)
+      IF <ls_mara>-mstae >= '70'.
+        ls_return-type       = 'E'.
+        ls_return-row        = lv_current_row.
+        ls_return-id         = 'ZBMU_MSG_CLASS'.
+        ls_return-number     = '006'.
+        ls_return-message    = 'Material Blocked at Client Level (>70)'.
+        ls_return-message_v1 = <ls_row>-material.
+        APPEND ls_return TO gt_return.
+        lv_error_found = abap_true.
+      ENDIF.
+
+    ENDIF.
+
+
+
+    " --- YOUR SUCCESS LOGIC (At the bottom) ---
+    IF lv_error_found = abap_false.
+      CLEAR ls_return.
+      ls_return-type       = 'S'.
+      ls_return-row        = lv_current_row.
+      ls_return-id         = 'ZBMU_MSG_CLASS'.
+      ls_return-number     = '000'.
+      ls_return-message    = 'Validation OK'.
+      ls_return-message_v1 = <ls_row>-material.
+      APPEND ls_return TO gt_return.
+    ENDIF.
+
+  ENDLOOP.
+ENDFORM.
+
+FORM execute_bom_maintain.
+
+
+  DATA: ls_stko_open      TYPE stko_api02,
+        lt_stpo_open      TYPE TABLE OF stpo_api02,
+        lt_dep_data       TYPE TABLE OF csdep_dat,
+        ls_stpo_maintain  TYPE stpo_api02,
+        lv_warning        TYPE capiflag-flwarning,
+        lv_item_warning   LIKE capiflag-flwarning,
+        lv_log_error      TYPE sy-subrc.
+
+  DATA: lt_log_messages TYPE STANDARD TABLE OF messages,
+        ls_log_msg      TYPE messages,
+        ls_return_log   TYPE bapiret2. " Temporary structure for the loop
+
+  DATA: lx_root           TYPE REF TO cx_root,
+        lv_dump_msg       TYPE string.
+
+  CLEAR gt_return.
+
+
+ CALL FUNCTION 'CALO_INIT_API'
+    EXCEPTIONS OTHERS = 0.
+
+  " Force close any previous BOM that might be stuck in memory
+  CALL FUNCTION 'CSAP_MAT_BOM_CLOSE'
+    EXPORTING fl_commit_and_wait = ' '
+    EXCEPTIONS OTHERS = 0.
+
+
+  " --- START LOOP (Even if it is just 1 row per call) ---
+  LOOP AT gt_xldata INTO DATA(ls_data).
+
+    DATA(lv_line) = sy-tabix.
+
+    " --- 1. OPEN BOM ---
+    CALL FUNCTION 'CSAP_MAT_BOM_OPEN'
+      EXPORTING
+        material    = ls_data-material
+        plant       = ls_data-plant
+        bom_usage   = ls_data-bomusage
+        alternative = ls_data-alternativebom
+        change_no   = ls_data-changenumber
+      IMPORTING
+        o_stko      = ls_stko_open
+        fl_warning  = lv_warning
+      TABLES
+        t_stpo      = lt_stpo_open
+        t_dep_data  = lt_dep_data
+      EXCEPTIONS
+        error              = 1
+        bom_not_exist      = 4
+        material_not_found = 11
+        error_message      = 99
+        OTHERS             = 21.
+
+    IF sy-subrc <> 0.
+       " Optional: Retry once if locked
+       IF sy-subrc = 1 OR sy-subrc = 21.
+          WAIT UP TO 1 SECONDS.
+          CALL FUNCTION 'CSAP_MAT_BOM_OPEN'
+             EXPORTING material = ls_data-material
+                       plant = ls_data-plant
+                       bom_usage = ls_data-bomusage
+                       alternative = ls_data-alternativebom
+                       change_no = ls_data-changenumber
+             TABLES    t_stpo = lt_stpo_open
+             EXCEPTIONS OTHERS = 1.
+       ENDIF.
+    ENDIF.
+
+    " CHECK FINAL RESULT AFTER RETRY
+    IF sy-subrc <> 0.
+       " ---------------- START OF LOG CAPTURE ----------------
+       CALL FUNCTION 'CALO_LOG_READ_MESSAGES'
+         EXPORTING
+           language                = sy-langu
+         TABLES
+           messages_and_parameters = lt_log_messages
+         EXCEPTIONS
+           OTHERS                  = 1.
+
+       IF lt_log_messages IS NOT INITIAL.
+         LOOP AT lt_log_messages INTO ls_log_msg.
+           CLEAR ls_return_log.
+           ls_return_log-row        = lv_line.
+           ls_return_log-type       = ls_log_msg-msg_type.
+           ls_return_log-id         = ls_log_msg-msg_id.
+           ls_return_log-number     = ls_log_msg-msg_no.
+           ls_return_log-message_v1 = ls_log_msg-msg_v1.
+           ls_return_log-message_v2 = ls_log_msg-msg_v2.
+           ls_return_log-message_v3 = ls_log_msg-msg_v3.
+           ls_return_log-message_v4 = ls_log_msg-msg_v4.
+
+           MESSAGE ID ls_log_msg-msg_id TYPE ls_log_msg-msg_type NUMBER ls_log_msg-msg_no
+                 WITH ls_log_msg-msg_v1 ls_log_msg-msg_v2 ls_log_msg-msg_v3 ls_log_msg-msg_v4
+                 INTO ls_return_log-message.
+
+           APPEND ls_return_log TO gt_return.
+         ENDLOOP.
+       ELSE.
+         " Fallback if no log found
+         APPEND VALUE #( type = 'E' message = |BOM Open Failed. RC: { sy-subrc }| row = lv_line ) TO gt_return.
+       ENDIF.
+       " ---------------- END OF LOG CAPTURE ----------------
+
+       " Clean up and skip to next row
+        CALL FUNCTION 'CSAP_MAT_BOM_CLOSE'
+        EXPORTING fl_commit_and_wait = ' '
+        EXCEPTIONS OTHERS = 1.
+       CONTINUE.
+    ENDIF.
+
+    " --- 2. PREPARE ITEM DATA ---
+    DATA: lv_item_no_4(4) TYPE C.
+    lv_item_no_4 = ls_data-itemnumber+2(4).
+
+
+    CLEAR: ls_stpo_maintain.
+
+    " Unit Conversion
+    DATA: lv_unit_input(3) TYPE C,   " Generic CHAR(3) for input
+          lv_unit_output(3) TYPE C.
+    lv_unit_input = ls_data-unitofmeasure.
+
+    CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT' "This part convert PC unit
+      EXPORTING
+        input           = lv_unit_input
+        language        = sy-langu
+      IMPORTING
+        output          = lv_unit_output
+      EXCEPTIONS
+        unit_not_found  = 1
+        OTHERS          = 2.
+
+  IF sy-subrc IS INITIAL.
+      ls_stpo_maintain-comp_unit = lv_unit_output.
+    ELSE.
+      ls_stpo_maintain-comp_unit = lv_unit_input.
+      APPEND VALUE #( type = 'W' message = |Line { lv_line }: Unit { lv_unit_input } not standardized. Using as-is.| ) TO gt_return.
+    ENDIF.
+
+     "  this part read open bom items and takes item counter and item node when needed to change or delete
+     READ TABLE lt_stpo_open ASSIGNING FIELD-SYMBOL(<ls_open_item>)
+         WITH KEY item_no = lv_item_no_4.
+
+     IF sy-subrc = 0.
+      " Found: Use the IDs SAP just gave us in LT_STPO_OPEN
+      ls_stpo_maintain-item_node  = <ls_open_item>-item_node.
+      ls_stpo_maintain-item_count = <ls_open_item>-item_count.
+    ELSE.
+      " Not Found: This is a brand new item, clear IDs to trigger CREATE
+      CLEAR: ls_stpo_maintain-item_node,
+             ls_stpo_maintain-item_count.
+    ENDIF.
+
+     ls_stpo_maintain-item_no    = lv_item_no_4.
+     ls_stpo_maintain-component  = ls_data-component.
+     ls_stpo_maintain-comp_unit  = ls_data-unitofmeasure.
+     ls_stpo_maintain-comp_qty   = ls_data-quantity.
+     ls_stpo_maintain-item_categ = ls_data-itemcategory.
+     ls_stpo_maintain-fldelete   = ls_data-deleteindicator.
+     ls_stpo_maintain-op_scrap   = ls_data-operationscrap.
+
+  TRY.
+    CALL FUNCTION 'CSAP_BOM_ITEM_MAINTAIN'
+      EXPORTING
+        i_stpo     = ls_stpo_maintain
+      IMPORTING
+        fl_warning = lv_item_warning
+        o_stpo     = ls_stpo_maintain
+      TABLES
+        t_dep_data = lt_dep_data
+      EXCEPTIONS
+        error_message      = 99
+        OTHERS     = 1.
+
+    IF sy-subrc <> 0.
+       " ---------------- START OF NEW LOGIC ----------------
+       " 1. Read the specific error (e.g. 'Item 5 does not exist') from memory
+       CALL FUNCTION 'CALO_LOG_READ_MESSAGES'
+         EXPORTING
+           language           = sy-langu
+         TABLES
+           messages_and_parameters           = lt_log_messages
+         EXCEPTIONS
+           log_not_found      = 1
+           OTHERS             = 2.
+
+       IF lt_log_messages IS NOT INITIAL.
+         " 2. If logs found, add them to your return table
+         LOOP AT lt_log_messages INTO ls_log_msg.
+           CLEAR ls_return_log.
+           ls_return_log-type       = ls_log_msg-msg_type.
+           ls_return_log-id         = ls_log_msg-msg_id.
+           ls_return_log-number     = ls_log_msg-msg_no.
+           ls_return_log-row        = lv_line. " Map the Excel Row number
+
+           ls_return_log-message_v1 = ls_log_msg-msg_v1.
+           ls_return_log-message_v2 = ls_log_msg-msg_v2.
+           ls_return_log-message_v3 = ls_log_msg-msg_v3.
+           ls_return_log-message_v4 = ls_log_msg-msg_v4.
+
+           " Resolve the cryptic message variables into text
+           MESSAGE ID ls_log_msg-msg_id
+                 TYPE ls_log_msg-msg_type
+               NUMBER ls_log_msg-msg_no
+                 WITH ls_log_msg-msg_v1 ls_log_msg-msg_v2
+                      ls_log_msg-msg_v3 ls_log_msg-msg_v4
+                 INTO ls_return_log-message.
+
+           APPEND ls_return_log TO gt_return.
+         ENDLOOP.
+       ELSE.
+         " 3. Fallback
+         APPEND VALUE #( type = 'E' message = |Item Maintain Failed. RC: { sy-subrc } (No Log)| row = lv_line ) TO gt_return.
+       ENDIF.
+       " ---------------- END OF NEW LOGIC ----------------
+
+        CALL FUNCTION 'CSAP_MAT_BOM_CLOSE'
+        EXPORTING fl_commit_and_wait = ' '
+        EXCEPTIONS OTHERS = 1.
+       CONTINUE.
+    ENDIF.
+
+
+    CATCH cx_root INTO lx_root.
+        " !!! THIS CATCHES THE CONVT_OVERFLOW !!!
+        lv_dump_msg = lx_root->get_text( ).
+        APPEND VALUE #( type = 'E' message = |CRITICAL DUMP: Data Overflow. Check Excel Columns! ({ lv_dump_msg })| row = lv_line ) TO gt_return.
+
+        " Rollback this item so we can safely try the next one
+        CALL FUNCTION 'CSAP_MAT_BOM_CLOSE' EXPORTING fl_commit_and_wait = ' '.
+
+        " Skip to next row
+        CONTINUE.
+    ENDTRY.
+
+    " --- 4. CLOSE AND COMMIT (The Most Important Part) ---
+
+    " A. Close the BOM in memory
+    CALL FUNCTION 'CSAP_MAT_BOM_CLOSE'
+      EXPORTING
+        fl_commit_and_wait = 'X' " Tell SAP to Commit
+      IMPORTING
+        fl_warning         = lv_warning
+      EXCEPTIONS
+        OTHERS             = 1.
+
+    " B. Hard Database Commit & Wait
+    " This forces the program to pause until the DB is 100% finished writing.
+    " This prevents the next row from hitting a lock.
+    "CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+    "EXPORTING
+      "wait = 'X'.
+
+    " Store the result of the Close (0 = Success, <>0 = Error)
+    DATA(lv_close_subrc) = sy-subrc.
+
+    " --- B. READ ALL MESSAGES (SUCCESS OR ERROR) ---
+    " This uses the exact same logic as your Item Maintain error handling
+    CLEAR lt_log_messages.
+
+    CALL FUNCTION 'CALO_LOG_READ_MESSAGES'
+      EXPORTING
+        language                = sy-langu
+      TABLES
+        messages_and_parameters = lt_log_messages
+      EXCEPTIONS
+        log_not_found           = 1
+        OTHERS                  = 2.
+
+    IF lt_log_messages IS NOT INITIAL.
+
+      IF lv_close_subrc = 0.
+         " Delete everything that is NOT 'S'
+         DELETE lt_log_messages WHERE msg_type <> 'S'.
+      ELSE.
+         " Delete everything that is NOT Error
+         DELETE lt_log_messages WHERE msg_type <> 'E' AND msg_type <> 'A'.
+      ENDIF.
+
+
+      " LOOP through whatever is in the log (Success, Info, Error, etc.)
+      LOOP AT lt_log_messages INTO ls_log_msg.
+
+
+        CLEAR ls_return_log.
+        ls_return_log-row        = lv_line.            " Map Excel Row
+        ls_return_log-type       = ls_log_msg-msg_type. " S, E, W, I, A
+        ls_return_log-id         = ls_log_msg-msg_id.
+        ls_return_log-number     = ls_log_msg-msg_no.
+        ls_return_log-message_v1 = ls_log_msg-msg_v1.
+        ls_return_log-message_v2 = ls_log_msg-msg_v2.
+        ls_return_log-message_v3 = ls_log_msg-msg_v3.
+        ls_return_log-message_v4 = ls_log_msg-msg_v4.
+
+        " Resolve the message variables into readable text
+        MESSAGE ID ls_log_msg-msg_id
+              TYPE ls_log_msg-msg_type
+            NUMBER ls_log_msg-msg_no
+              WITH ls_log_msg-msg_v1 ls_log_msg-msg_v2
+                   ls_log_msg-msg_v3 ls_log_msg-msg_v4
+              INTO ls_return_log-message.
+
+        APPEND ls_return_log TO gt_return.
+      ENDLOOP.
+
+    ELSE.
+      " --- C. FALLBACK (Only if log is completely empty) ---
+      IF lv_close_subrc = 0.
+         APPEND VALUE #( type = 'S' message = 'BOM Updated Successfully (No API Log)' row = lv_line ) TO gt_return.
+      ELSE.
+         APPEND VALUE #( type = 'E' message = 'Commit Failed (No API Log)' row = lv_line ) TO gt_return.
+      ENDIF.
+    ENDIF.
+
+
+
+    " C. Extra safety: Clear memory again before next loop/call
+    CALL FUNCTION 'CALO_INIT_API'.
+
+    FREE: ls_stko_open,
+          lt_stpo_open,
+          lt_dep_data,
+          ls_stpo_maintain.
+
+  ENDLOOP.
+
+ENDFORM.
