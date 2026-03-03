@@ -1,0 +1,103 @@
+managed;
+strict ( 2 );
+with draft;
+
+define behavior for ZBMU_I_HEADER alias XLHead
+implementation in class zbmu_cl_bp_xl_user unique
+persistent table zbmu_file_header
+lock master
+total etag LastChangedAt
+draft table zbmu_header_dr
+early numbering
+authorization master ( global )
+etag master LocalLastChangedAt
+
+{
+  create;
+  update;
+  delete;
+  field ( readonly ) EndUser, FileId;
+  association _XLData { create; with draft; }
+
+
+  action uploadExcelData result [1] $self;
+  action ( features : instance ) DownloadExcel result [1] $self;
+  determination FillFileStatus on modify { field EndUser; }
+  determination FillSelectedStatus on modify { field Attachment; }
+
+  // 'side effects' must be commented out because 'strict' is off.
+   side effects
+   {
+     field Attachment affects field FileStatus, entity _XLData;
+     action uploadExcelData affects $self, messages;
+     action DownloadExcel affects $self;
+   }
+
+  draft action Activate optimized;
+  draft action Edit;
+  draft action Discard;
+  draft action Resume;
+  draft determine action Prepare;
+
+  mapping for zbmu_file_header
+    {
+      EndUser            = end_user;
+      FileId             = file_id;
+      FileStatus         = file_status;
+      Attachment         = attachment;
+      Mimetype           = mimetype;
+      Filename           = filename;
+      LocalCreatedBy     = local_created_by;
+      LocalCreatedAt     = local_created_at;
+      LocalLastChangedBy = local_last_changed_by;
+      LocalLastChangedAt = local_last_changed_at;
+      LastChangedAt      = last_changed_at;
+    }
+}
+
+define behavior for ZBMU_I_STAGING alias XLData
+implementation in class zbmu_cl_bp_xl_data unique
+persistent table zbmu_staging_bom
+draft table zbmu_staging_dr
+lock dependent by _XLUser
+// 'authorization dependent' must be commented out.
+authorization dependent by _XLUser
+{
+  update;
+  delete;
+  field ( readonly ) EndUser, FileId, LineNumber,
+                     material, plant, bomusage, alternativebom,
+                     changenumber, validfrom, bomnumber, itemnode, itemcounter, itemnumber, component, unitofmeasure, itemcategory, componenttext, quantity;
+  field ( readonly, numbering : managed ) LineId;
+
+  association _XLUser { with draft; }
+
+  action processData result [1] $self;
+
+  mapping for zbmu_staging_bom
+    {
+      EndUser       = end_user;
+      FileId        = file_id;
+      LineId        = line_id;
+      LineNumber    = line_no;
+      Material       = material;
+      Plant          = plant;
+      BomUsage       = bomusage;
+      AlternativeBom = alternativebom;
+      ChangeNumber   = changenumber;
+      ValidFrom      = validfrom;
+      ItemNumber     = itemnumber;
+      Component      = component;
+      UnitOfMeasure  = unitofmeasure;
+      ItemCategory   = itemcategory;
+      ComponentText  = componenttext;
+      Quantity       = quantity;
+      BomNumber      = bomnumber;
+      ItemNode       = itemnode;
+      ItemCounter    = itemcounter;
+      OperationScrap = operationscrap;
+      DeleteIndicator = deleteindicator;
+      ProcessingStatus = processingstatus;
+      LogMessage       = logmessage;
+    }
+}
